@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Txt2Video - OmegaTech</title>
+<style>
+*{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{margin:0;background:#0f0f0f;color:#fff;display:flex;justify-content:center;padding:20px}
+.box{width:100%;max-width:500px;background:#1a1a1a;padding:20px;border-radius:16px}
+h2{margin:0 0 15px}
+label{display:block;font-size:13px;color:#aaa;margin-bottom:6px}
+input,select{width:100%;padding:12px;border-radius:10px;border:2px solid transparent;background:#2a2a2a;color:#fff;margin-bottom:12px;outline:none;font-size:15px;transition:border-color .2s}
+input:focus,select:focus{border-color:#6c5cff}
+input.invalid{border-color:#ff5c6c;animation:shake .35s}
+.row{display:flex;gap:10px}.row>div{flex:1}
+button{width:100%;padding:14px;border:0;border-radius:10px;background:#6c5cff;color:#fff;font-weight:700;font-size:16px;cursor:pointer;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:10px;transition:transform .1s,background .2s,opacity .2s}
+button:hover:not(:disabled){background:#7d6fff}
+button:active:not(:disabled){transform:scale(.98)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.btn2{background:#2a2a2a}.btn2:hover:not(:disabled){background:#363636}
+.btn-cancel{background:#3a2226;color:#ff8a96}.btn-cancel:hover:not(:disabled){background:#4a2a30}
+.spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:none}
+button.loading .spinner{display:inline-block}
+.err{color:#ff8a96;font-size:13px;min-height:18px;margin:-4px 0 6px}
+
+#progress{display:none;margin-top:16px}
+#progress.show{display:block;animation:fade .3s}
+.pbar{height:10px;background:#2a2a2a;border-radius:99px;overflow:hidden}
+.pfill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,#6c5cff,#a79bff,#6c5cff);background-size:200% 100%;animation:shimmer 1.2s linear infinite;transition:width .4s ease-out}
+.pfill.done{background:#3ecf8e;animation:none}
+.pfill.fail{background:#ff5c6c;animation:none}
+.pmeta{display:flex;justify-content:space-between;font-size:12px;color:#aaa;margin-top:8px}
+
+#result{margin-top:20px;display:none}
+#result.show{display:block;animation:fade .5s}
+video{width:100%;border-radius:12px;background:#000;max-height:70vh}
+#log{font-size:11px;color:#888;margin-top:10px;white-space:pre-wrap;word-break:break-all;background:#111;padding:8px;border-radius:8px;max-height:140px;overflow:auto}
+
+#toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);background:#2a2a2a;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;pointer-events:none;transition:.25s;max-width:90vw}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#toast.error{background:#4a2a30;color:#ffb3bb}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes shimmer{to{background-position:-200% 0}}
+@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes shake{25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>Txt2Video - OmegaTech</h2>
+
+  <label for="prompt">Prompt</label>
+  <input id="prompt" placeholder="A cow in city" value="A cow in city" maxlength="500" autocomplete="off">
+  <div class="err" id="promptErr" role="alert"></div>
+
+  <div class="row">
+    <div>
+      <label for="ratio">Aspect ratio</label>
+      <select id="ratio">
+        <option value="auto" selected>Auto</option>
+        <option value="16:9">16:9</option>
+        <option value="9:16">9:16</option>
+        <option value="1:1">1:1</option>
+      </select>
+    </div>
+    <div>
+      <label for="sound">Sound</label>
+      <select id="sound">
+        <option value="true" selected>Sound on</option>
+        <option value="false">Sound off</option>
+      </select>
+    </div>
+  </div>
+
+  <button id="btn" type="button"><span class="spinner"></span><span id="btnText">Generate video</span></button>
+  <button id="cancelBtn" class="btn-cancel" type="button" style="display:none">Cancel</button>
+
+  <div id="progress" aria-live="polite">
+    <div class="pbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="pbar">
+      <div class="pfill" id="pfill"></div>
+    </div>
+    <div class="pmeta"><span id="pstage">Starting…</span><span><span id="ppct">0%</span> · <span id="ptime">0s</span></span></div>
+  </div>
+
+  <div id="result">
+    <video id="vid" controls loop playsinline></video>
+    <button class="btn2" id="downloadBtn" type="button">Download video</button>
+    <button class="btn2" id="copyBtn" type="button">Copy link</button>
+    <div id="log"></div>
+  </div>
+</div>
+<div id="toast" role="status"></div>
+
+<script>
+const API = 'https://api.omegatech.app/api/ai/Txt2video';
+const TIMEOUT_MS = 180000; // 3 minutes
+
+/* ---------- Direct fetch with retry ----------
+   Gateway timeouts (502/503/504/52x) and dropped connections after a long wait
+   are retried automatically. Instant failures (likely CORS) are not retried. */
+const MAX_RETRIES = 2;
+const RETRY_STATUS = [502, 503, 504, 520, 522, 524];
+let retryNote = '';
+
+function sleep(ms, signal){
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    if(signal) signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once:true });
+  });
+}
+
+async function fetchWithRetry(url, opts = {}){
+  for(let attempt = 0; ; attempt++){
+    const t0 = Date.now();
+    try{
+      const res = await fetch(url, opts);
+      if(RETRY_STATUS.includes(res.status) && attempt < MAX_RETRIES){
+        retryNote = ` (retry ${attempt + 1}/${MAX_RETRIES}: HTTP ${res.status})`;
+        await sleep(2000 * (attempt + 1), opts.signal);
+        continue;
+      }
+      return res;
+    }catch(e){
+      if(e.name === 'AbortError') throw e;
+      const slow = Date.now() - t0 > 5000;   // fast failure = CORS/blocked, slow = dropped connection
+      if(slow && attempt < MAX_RETRIES){
+        retryNote = ` (retry ${attempt + 1}/${MAX_RETRIES}: connection dropped)`;
+        await sleep(2000 * (attempt + 1), opts.signal);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+const $ = id => document.getElementById(id);
+const els = {
+  prompt:$('prompt'), promptErr:$('promptErr'), ratio:$('ratio'), sound:$('sound'),
+  btn:$('btn'), btnText:$('btnText'), cancel:$('cancelBtn'),
+  progress:$('progress'), pbar:$('pbar'), pfill:$('pfill'), pstage:$('pstage'), ppct:$('ppct'), ptime:$('ptime'),
+  result:$('result'), vid:$('vid'), log:$('log'), dl:$('downloadBtn'), copy:$('copyBtn'), toast:$('toast')
+};
+
+let currentVideoUrl = '';
+let controller = null;
+let ticker = null;
+let toastTimer = null;
+let cancelledByUser = false;
+
+/* ---------- UI helpers ---------- */
+function toast(msg, isError){
+  els.toast.textContent = msg;
+  els.toast.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.className = '', 3000);
+}
+
+function setPromptError(msg){
+  els.promptErr.textContent = msg || '';
+  els.prompt.classList.remove('invalid');
+  if(msg){ void els.prompt.offsetWidth; els.prompt.classList.add('invalid'); els.prompt.focus(); }
+}
+
+function setProgress(pct, stage){
+  pct = Math.max(0, Math.min(100, pct));
+  els.pfill.style.width = pct + '%';
+  els.pbar.setAttribute('aria-valuenow', Math.round(pct));
+  els.ppct.textContent = Math.round(pct) + '%';
+  if(stage) els.pstage.textContent = stage;
+}
+
+function setBusy(busy){
+  els.btn.disabled = busy;
+  els.btn.classList.toggle('loading', busy);
+  els.btnText.textContent = busy ? 'Generating…' : 'Generate video';
+  els.cancel.style.display = busy ? 'flex' : 'none';
+  [els.prompt, els.ratio, els.sound].forEach(e => e.disabled = busy);
+}
+
+/* Fake-but-honest progress: the API gives no real progress, so ease toward 92% and
+   jump to 100% only when the video URL actually arrives. */
+function startProgress(){
+  const start = Date.now();
+  els.progress.classList.add('show');
+  els.pfill.className = 'pfill';
+  setProgress(2, 'Sending request…');
+  clearInterval(ticker);
+  ticker = setInterval(() => {
+    const s = (Date.now() - start) / 1000;
+    const pct = 92 * (1 - Math.exp(-s / 35));
+    const stage = s < 3 ? 'Sending request…' : s < 20 ? 'Queued, starting render…' : s < 60 ? 'Generating frames…' : 'Still working, almost there…';
+    setProgress(pct, stage + retryNote);
+    els.ptime.textContent = Math.floor(s) + 's';
+  }, 250);
+}
+
+function stopProgress(state){
+  clearInterval(ticker);
+  if(state === 'done'){ els.pfill.classList.add('done'); setProgress(100, 'Done'); }
+  else if(state === 'fail'){ els.pfill.classList.add('fail'); els.pstage.textContent = 'Failed'; }
+}
+
+function showLog(text){ els.log.textContent = text; }
+
+/* ---------- Main ---------- */
+async function generate(){
+  const prompt = els.prompt.value.trim();
+  setPromptError('');
+
+  if(!prompt){ setPromptError('Enter a prompt describing the video.'); return; }
+  if(prompt.length < 3){ setPromptError('Prompt is too short. Add a few more words.'); return; }
+  if(!navigator.onLine){ toast('You are offline. Check your connection and try again.', true); return; }
+
+  const params = new URLSearchParams({ action:'generate', prompt, ratio: els.ratio.value, sound: els.sound.value });
+
+  controller = new AbortController();
+  cancelledByUser = false;
+  retryNote = '';
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  els.result.classList.remove('show');
+  els.vid.removeAttribute('src'); els.vid.load();
+  currentVideoUrl = '';
+  setBusy(true);
+  startProgress();
+
+  try{
+    const res = await fetchWithRetry(`${API}?${params}`, { signal: controller.signal });
+
+    if(!res.ok){
+      const hint = res.status === 429 ? 'Too many requests. Wait a minute and retry.'
+                 : [504, 524].includes(res.status) ? 'The server timed out while rendering.'
+                 : res.status >= 500 ? 'The server had a problem. Try again shortly.'
+                 : 'The request was rejected.';
+      let body = ''; try{ body = (await res.text()).slice(0, 500); }catch{}
+      const err = new Error(`HTTP ${res.status}. ${hint}`); err.detail = body; throw err;
+    }
+
+    let json;
+    try{ json = await res.json(); }
+    catch{ throw new Error('The server sent a response that is not valid JSON.'); }
+
+    const url = json && json.data && json.data.videoUrl;
+    if(!json.success || !url){
+      showLog(JSON.stringify(json, null, 2));
+      els.result.classList.add('show');
+      els.vid.style.display = 'none'; els.dl.style.display = 'none'; els.copy.style.display = 'none';
+      throw new Error((json && (json.message || json.error)) || 'The API did not return a video.');
+    }
+    if(!/^https?:\/\//i.test(url)) throw new Error('The API returned an invalid video link.');
+
+    currentVideoUrl = url;
+    els.vid.style.display = ''; els.dl.style.display = ''; els.copy.style.display = '';
+    els.vid.src = url;
+    els.vid.load();
+    showLog(`Prompt: ${json.data.prompt || prompt}\nURL: ${url}`);
+    els.result.classList.add('show');
+    stopProgress('done');
+    toast('Video ready');
+
+    // Autoplay may be blocked when sound is on; that is fine, the user can press play.
+    els.vid.play().catch(() => {});
+  }catch(e){
+    stopProgress('fail');
+    let msg;
+    if(e.name === 'AbortError') msg = cancelledByUser ? 'Generation cancelled.' : 'Timed out after 3 minutes. Try a simpler prompt.';
+    else if(e instanceof TypeError) msg = 'Network error. Check your connection. If it fails instantly, the API may be blocking browser requests (CORS).';
+    else msg = e.message || 'Something went wrong.';
+    if(!els.result.classList.contains('show')){ showLog('Error: ' + msg + (e.detail ? '\n\n' + e.detail : '')); els.result.classList.add('show'); els.vid.style.display='none'; els.dl.style.display='none'; els.copy.style.display='none'; }
+    els.pstage.textContent = msg;
+    toast(msg, !cancelledByUser);
+  }finally{
+    clearTimeout(timeout);
+    controller = null;
+    setBusy(false);
+  }
+}
+
+function cancelGeneration(){
+  if(controller){ cancelledByUser = true; controller.abort(); }
+}
+
+/* ---------- Video actions ---------- */
+els.vid.addEventListener('error', () => {
+  if(!currentVideoUrl) return;
+  toast('The video could not be loaded. The link may have expired.', true);
+  showLog(`Video failed to load.\nURL: ${currentVideoUrl}`);
+});
+
+async function downloadVideo(){
+  if(!currentVideoUrl) return;
+  const name = `txt2video-${Date.now()}.mp4`;
+  els.dl.disabled = true; els.dl.textContent = 'Downloading…';
+  try{
+    // Blob download works only if the host allows CORS; otherwise fall back to a normal link.
+    const res = await fetch(currentVideoUrl);
+    if(!res.ok) throw new Error('bad status');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('Download started');
+  }catch{
+    window.open(currentVideoUrl, '_blank', 'noopener');
+    toast('Opened in a new tab. Use the video menu to save it.');
+  }finally{
+    els.dl.disabled = false; els.dl.textContent = 'Download video';
+  }
+}
+
+async function copyLink(){
+  if(!currentVideoUrl) return;
+  try{
+    await navigator.clipboard.writeText(currentVideoUrl);
+    toast('Link copied');
+  }catch{
+    // Fallback for non-secure contexts
+    const t = document.createElement('textarea');
+    t.value = currentVideoUrl; document.body.appendChild(t); t.select();
+    let ok = false;
+    try{ ok = document.execCommand('copy'); }catch{}
+    t.remove();
+    toast(ok ? 'Link copied' : 'Could not copy. Select the link in the log below.', !ok);
+  }
+}
+
+/* ---------- Wiring ---------- */
+els.btn.addEventListener('click', generate);
+els.cancel.addEventListener('click', cancelGeneration);
+els.dl.addEventListener('click', downloadVideo);
+els.copy.addEventListener('click', copyLink);
+els.prompt.addEventListener('keydown', e => { if(e.key === 'Enter' && !els.btn.disabled) generate(); });
+els.prompt.addEventListener('input', () => setPromptError(''));
+window.addEventListener('offline', () => toast('You went offline.', true));
+</script>
+</body>
+          </html>
+  
